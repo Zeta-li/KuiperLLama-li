@@ -8,5 +8,11 @@ void rope_kernel_cpu(int32_t dim, int32_t kv_dim, int32_t head_size, const tenso
                      const tensor::Tensor& input_k, const tensor::Tensor& input_pos,
                      const tensor::Tensor& sin_cache, const tensor::Tensor& cos_cache,
                      void* stream);
+
+void rope_kernel_cpu_batch(int32_t dim, int32_t kv_dim, int32_t head_size,
+                           int32_t token_num, const tensor::Tensor& input_q,
+                           const tensor::Tensor& input_k, const tensor::Tensor& input_pos,
+                           const tensor::Tensor& sin_cache, const tensor::Tensor& cos_cache,
+                           void* stream);
 }  // namespace kernel
 #endif  // LLAMA_INFER_ROPE_KERNEL_H

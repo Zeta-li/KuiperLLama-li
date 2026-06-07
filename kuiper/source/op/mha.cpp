@@ -30,16 +30,33 @@ base::Status MultiHeadAttention::forward() {
   if (device_type_ == base::DeviceType::kDeviceCUDA) {
     CHECK(cuda_config_ != nullptr);
   }
-  kernel::get_mha_kernel(device_type_)(pos_, head_num_, layer_index_, seq_len_, kv_dim_, kv_mul_,
-                                       head_size_, mha_out, query_tensor, score_tensor,
-                                       key_cache_tensor, value_cache_tensor, device_type_,
-                                       cuda_config_ ? cuda_config_.get() : nullptr);
+
+  if (mode_ == MHA_MODE::PREFILL) {
+    kernel::get_mha_prefill_kernel(device_type_)(
+        pos_start_, token_num_, head_num_, layer_index_, seq_len_, kv_dim_, kv_mul_,
+        head_size_, mha_out, query_tensor, score_tensor, key_cache_tensor,
+        value_cache_tensor, device_type_, cuda_config_ ? cuda_config_.get() : nullptr);
+  } else {
+    kernel::get_mha_kernel(device_type_)(pos_, head_num_, layer_index_, seq_len_, kv_dim_, kv_mul_,
+                                         head_size_, mha_out, query_tensor, score_tensor,
+                                         key_cache_tensor, value_cache_tensor, device_type_,
+                                         cuda_config_ ? cuda_config_.get() : nullptr);
+  }
   return base::error::Success();
 }
 
 void MultiHeadAttention::set_pos(int32_t pos) { this->pos_ = pos; }
 
 void MultiHeadAttention::set_layer_idx(int32_t layer_idx) { this->layer_index_ = layer_idx; }
+
+void MultiHeadAttention::set_mode(MHA_MODE mode) { this->mode_ = mode; }
+
+void MultiHeadAttention::set_pos_range(int32_t start, int32_t end) {
+  this->pos_start_ = start;
+  this->pos_end_ = end;
+}
+
+void MultiHeadAttention::set_token_num(int32_t token_num) { this->token_num_ = token_num; }
 
 base::Status MultiHeadAttention::check() const {
   base::Status status;

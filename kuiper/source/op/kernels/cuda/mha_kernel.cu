@@ -126,4 +126,86 @@ void mha_kernel_cu(int32_t pos, int32_t head_num, int32_t layer_index, int32_t s
       head_size, layer_offset);
 }
 
+// Prefill MHA kernel: causal self-attention for all prompt tokens
+// Each block handles one (query_token, head) pair
+__global__ void multi_head_attention_prefill_kernel(
+    int32_t pos_start, int32_t token_num, int32_t seq_len, float* query, float* score_ptr,
+    float* output, float* key_cache, float* value_cache, int32_t kv_dim, int32_t kv_mul,
+    int32_t head_num, int32_t head_size, int32_t layer_offset) {
+  // blockIdx.x encodes (query_token_idx * head_num + head)
+  int qi = blockIdx.x / head_num;
+  int head = blockIdx.x % head_num;
+
+  if (qi >= token_num || head >= head_num) return;
+
+  int32_t q_pos = pos_start + qi;
+  float scale = 1.f / sqrtf(float(head_size));
+  int head_offset = (head / kv_mul) * head_size;
+
+  // Load query for this token and head into shared memory
+  extern __shared__ float s_query_head[];
+  float* query_head = query + qi * head_num * head_size + head * head_size;
+  for (int i = threadIdx.x; i < head_size; i += blockDim.x) {
+    s_query_head[i] = query_head[i];
+  }
+  __syncthreads();
+
+  // Score buffer for this (qi, head) pair
+  float* score_head = score_ptr + (qi * head_num + head) * seq_len;
+
+  // Compute attention scores: query * key^T for positions [0, q_pos]
+  for (int t = threadIdx.x; t <= q_pos; t += blockDim.x) {
+    float* key_head = key_cache + layer_offset + t * kv_dim + head_offset;
+    float score = 0.0f;
+    for (int i = 0; i < head_size; i += 4) {
+      float4 key_val = *reinterpret_cast<float4*>(key_head + i);
+      float4 query_val = *reinterpret_cast<float4*>(s_query_head + i);
+      score += key_val.x * query_val.x + key_val.y * query_val.y + key_val.z * query_val.z +
+               key_val.w * query_val.w;
+    }
+    score *= scale;
+    score_head[t] = score;
+  }
+  __syncthreads();
+
+  // Softmax over [0, q_pos]
+  softmax_gpu(score_head, q_pos + 1);
+  __syncthreads();
+
+  // Compute weighted sum of values
+  float* output_head = output + qi * head_num * head_size + head * head_size;
+  for (int i = threadIdx.x; i < head_size; i += blockDim.x) {
+    float value = 0.0f;
+    for (int t = 0; t <= q_pos; t++) {
+      float* value_head = value_cache + layer_offset + t * kv_dim + head_offset;
+      float attn_score = score_head[t];
+      value += attn_score * value_head[i];
+    }
+    output_head[i] = value;
+  }
+}
+
+void mha_prefill_kernel_cu(int32_t pos_start, int32_t token_num, int32_t head_num,
+                           int32_t layer_index, int32_t seq_len, int32_t kv_dim, int32_t kv_mul,
+                           int32_t head_size, const tensor::Tensor& mha_out,
+                           const tensor::Tensor& query_tensor, const tensor::Tensor& score_tensor,
+                           const tensor::Tensor& key_cache_tensor,
+                           const tensor::Tensor& value_cache_tensor, base::DeviceType device_type,
+                           CudaConfig* config) {
+  UNUSED(device_type);
+  int32_t layer_offset = layer_index * seq_len * kv_dim;
+  float* query = const_cast<float*>(query_tensor.ptr<float>());
+  float* score = const_cast<float*>(score_tensor.ptr<float>());
+  float* output = const_cast<float*>(mha_out.ptr<float>());
+  float* key_cache = const_cast<float*>(key_cache_tensor.ptr<float>());
+  float* value_cache = const_cast<float*>(value_cache_tensor.ptr<float>());
+
+  int32_t total_blocks = token_num * head_num;
+  cudaStream_t stream = config->stream;
+  multi_head_attention_prefill_kernel<<<total_blocks, thread_num, head_size * sizeof(float),
+                                       stream>>>(pos_start, token_num, seq_len, query, score,
+                                                 output, key_cache, value_cache, kv_dim, kv_mul,
+                                                 head_num, head_size, layer_offset);
+}
+
 }  // namespace kernel

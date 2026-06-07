@@ -58,6 +58,9 @@ class Qwen3Model : public Model {
   base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
                        int& next) const override;
 
+  base::Status prefill_predict(const tensor::Tensor& input, int32_t token_num,
+                               int32_t& next) const override;
+
   op::EmbeddingOutput embedding(const std::vector<int>& tokens) const override;
 
  private:
@@ -82,6 +85,21 @@ class Qwen3Model : public Model {
   void cls_logits(const tensor::Tensor& input) const;
 
   int32_t post_processing(const tensor::Tensor& pos, bool is_prompt) const override;
+
+  // Prefill-specific methods
+  base::Status prefill_forward(const tensor::Tensor& input, int32_t token_num,
+                                int32_t& next) const;
+
+  void attention_rms_prefill(int32_t layer_idx, const tensor::Tensor& input,
+                              int32_t token_num) const;
+
+  void attention_qkv_prefill(int32_t layer_idx, int32_t token_num,
+                              const tensor::Tensor& pos_batch) const;
+
+  void attention_mha_prefill(int32_t layer_idx, int32_t token_num) const;
+
+  void feed_forward_prefill(int32_t layer_idx, const tensor::Tensor& input,
+                             int32_t token_num) const;
 
  private:
   std::shared_ptr<kernel::CudaConfig> cuda_config_;

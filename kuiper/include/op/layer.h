@@ -22,6 +22,11 @@ enum class LayerType : uint8_t {
   kLayerSwiGLU = 10,
 };
 
+/**
+ * @brief BaseLayer 是一个抽象基类，定义了神经网络层的基本接口
+ * 
+ * 这个类规定了所有层必须实现的基本功能，包括初始化、前向传播、输入输出管理等
+ */
 class BaseLayer {
  public:
   explicit BaseLayer(base::DeviceType device_type, LayerType layer_type, base::DataType data_type,
@@ -90,6 +95,11 @@ class BaseLayer {
   base::DeviceType device_type_ = base::DeviceType::kDeviceUnknown;
 };
 
+/**
+ * @brief Layer类继承自BaseLayer，表示神经网络中的一个层
+ * 
+ * 该类提供了神经网络层的基本功能，包括初始化、张量检查、前向传播等。
+ */
 class Layer : public BaseLayer {
  public:
   explicit Layer(base::DeviceType device_type, LayerType layer_type, std::string layer_name = "");
@@ -154,6 +164,9 @@ class Layer : public BaseLayer {
   std::shared_ptr<kernel::CudaConfig> cuda_config_;
 };
 
+/**
+ * @brief LayerParam类，继承自Layer类，用于表示神经网络层的参数
+ */
 class LayerParam : public Layer {
  public:
   explicit LayerParam(base::DeviceType device_type, LayerType layer_type,

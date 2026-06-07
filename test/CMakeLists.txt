@@ -31,3 +31,7 @@ target_link_libraries(test_llm llama)
 
 set_target_properties(test_llm PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 set_target_properties(test_llm PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+
+
+
+

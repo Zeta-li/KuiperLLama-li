@@ -26,9 +26,20 @@ enum class ModelBufferType {
   kFFNRMSNorm = 13,
   kForwardOutput = 15,
   kForwardOutputCPU = 16,
-
   kSinCache = 17,
   kCosCache = 18,
+  kPrefillQuery = 19,         // [token_num, dim]
+  kPrefillKeyCache = 20,      // [token_num, kv_dim]
+  kPrefillValueCache = 21,    // [token_num, kv_dim]
+  kPrefillScoreStorage = 22,  // [head_num, token_num, seq_len]
+  kPrefillOutputMHA = 23,     // [token_num, dim]
+  kPrefillAttnOutput = 24,    // [token_num, hidden_dim]
+  kPrefillRMSOutput = 25,     // [token_num, hidden_dim]
+  kPrefillFFNRMSOutput = 26,  // [token_num, hidden_dim]
+  kPrefillW1Output = 27,      // [token_num, immediate_dim]
+  kPrefillW3Output = 28,      // [token_num, immediate_dim]
+  kPrefillW2Output = 29,      // [token_num, hidden_dim]
+  kInputPosBatch = 30,         // [token_num] positions for prefill
 };
 }
 

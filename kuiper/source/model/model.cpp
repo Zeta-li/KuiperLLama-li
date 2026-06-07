@@ -231,6 +231,27 @@ std::pair<tensor::Tensor, tensor::Tensor> Model::slice_kv_cache(int32_t layer_id
   return {key, val};
 }
 
+std::pair<tensor::Tensor, tensor::Tensor> Model::slice_kv_cache_range(int32_t layer_idx,
+                                                                      int32_t start_pos,
+                                                                      int32_t token_num) const {
+  int32_t layer_offset = layer_idx * config_->seq_len_ * config_->kv_dim_;
+  int32_t cache_offset = layer_offset + start_pos * config_->kv_dim_;
+
+  float* key_cache_ptr =
+      const_cast<float*>(get_buffer(ModelBufferType::kKeyCache).ptr<float>(cache_offset));
+  float* val_cache_ptr =
+      const_cast<float*>(get_buffer(ModelBufferType::kValueCache).ptr<float>(cache_offset));
+
+  // Return tensors shaped [token_num, kv_dim]
+  tensor::Tensor key(base::DataType::kDataTypeFp32, token_num, config_->kv_dim_, false, nullptr,
+                     key_cache_ptr);
+  tensor::Tensor val(base::DataType::kDataTypeFp32, token_num, config_->kv_dim_, false, nullptr,
+                     val_cache_ptr);
+  key.set_device_type(device_type_);
+  val.set_device_type(device_type_);
+  return {key, val};
+}
+
 tensor::Tensor Model::fill_input(const tensor::Tensor& pos_tensor,
                                  const op::EmbeddingOutput& embedding_output,
                                  bool is_prompt) const {
@@ -254,6 +275,30 @@ tensor::Tensor Model::fill_input(const tensor::Tensor& pos_tensor,
   tensor::Tensor input(base::DataType::kDataTypeFp32, config_->dim_);
 #endif
   input.assign(input_emb_buffer);
+  input.set_device_type(device_type_);
+  return input;
+}
+
+tensor::Tensor Model::fill_input_prefill(const op::EmbeddingOutput& embedding_output,
+                                           int32_t prompt_len) const {
+  auto [input_tokens, input_embeddings, input_token_num] = embedding_output;
+
+#if defined(QWEN3_SUPPORT)
+  int32_t hidden_dim = config_->hidden_dim_;
+  // Return a tensor view into the entire prompt embedding [prompt_len, hidden_dim]
+  std::shared_ptr<base::Buffer> input_emb_buffer = std::make_shared<base::Buffer>(
+      prompt_len * hidden_dim * sizeof(float), nullptr,
+      input_embeddings.ptr<float>(), true);
+  tensor::Tensor input(base::DataType::kDataTypeFp32, prompt_len, hidden_dim);
+  input.assign(input_emb_buffer);
+#else
+  int32_t dim = config_->dim_;
+  std::shared_ptr<base::Buffer> input_emb_buffer = std::make_shared<base::Buffer>(
+      prompt_len * dim * sizeof(float), nullptr,
+      input_embeddings.ptr<float>(), true);
+  tensor::Tensor input(base::DataType::kDataTypeFp32, prompt_len, dim);
+  input.assign(input_emb_buffer);
+#endif
   input.set_device_type(device_type_);
   return input;
 }

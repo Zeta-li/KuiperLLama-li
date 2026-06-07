@@ -27,6 +27,15 @@ typedef void (*MHAKernel)(int32_t pos, int32_t head_num, int32_t layer_index, in
                           const tensor::Tensor& value_cache_tensor, base::DeviceType device_type,
                           CudaConfig*);
 
+typedef void (*MHAPrefillKernel)(int32_t pos_start, int32_t token_num, int32_t head_num,
+                                 int32_t layer_index, int32_t seq_len, int32_t kv_dim,
+                                 int32_t kv_mul, int32_t head_size,
+                                 const tensor::Tensor& mha_out, const tensor::Tensor& query_tensor,
+                                 const tensor::Tensor& score_tensor,
+                                 const tensor::Tensor& key_cache_tensor,
+                                 const tensor::Tensor& value_cache_tensor,
+                                 base::DeviceType device_type, CudaConfig*);
+
 typedef void (*RMSNormKernel)(const tensor::Tensor& input, const tensor::Tensor& weight,
                               const tensor::Tensor& output, void* stream);
 
@@ -37,6 +46,11 @@ typedef void (*RoPEKernel)(int32_t dim, int32_t kv_dim, int32_t head_size,
                            const tensor::Tensor& input_q, const tensor::Tensor& input_k,
                            const tensor::Tensor& input_pos, const tensor::Tensor& sin_cache,
                            const tensor::Tensor& cos_cache, void* stream);
+
+typedef void (*RoPEKernelBatch)(int32_t dim, int32_t kv_dim, int32_t head_size, int32_t token_num,
+                                const tensor::Tensor& input_q, const tensor::Tensor& input_k,
+                                const tensor::Tensor& input_pos, const tensor::Tensor& sin_cache,
+                                const tensor::Tensor& cos_cache, void* stream);
 
 typedef void (*ScaleKernel)(float scale, const tensor::Tensor& input, void* stream);
 
@@ -58,9 +72,13 @@ MatmulKernelQuant get_matmul_kernel_quant8(base::DeviceType device_type);
 
 MHAKernel get_mha_kernel(base::DeviceType device_type);
 
+MHAPrefillKernel get_mha_prefill_kernel(base::DeviceType device_type);
+
 RMSNormKernel get_rmsnorm_kernel(base::DeviceType device_type);
 
 RoPEKernel get_rope_kernel(base::DeviceType device_type);
+
+RoPEKernelBatch get_rope_batch_kernel(base::DeviceType device_type);
 
 ScaleKernel get_scale_kernel(base::DeviceType device_type);
 

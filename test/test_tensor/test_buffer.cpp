@@ -5,11 +5,11 @@
 #include "../utils.cuh"
 
 TEST(test_buffer, allocate) {
-  using namespace base;
+  using namespace base;  
   auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
   Buffer buffer(32, alloc);
   ASSERT_NE(buffer.ptr(), nullptr);
-}
+ } 
 
 TEST(test_buffer, use_external) {
   using namespace base;
@@ -20,30 +20,45 @@ TEST(test_buffer, use_external) {
   delete[] ptr;
 }
 
+/**
+ * @brief 测试CUDA内存拷贝功能的测试用例
+ * 验证CPU和GPU之间的数据传输是否正确
+ */
 TEST(test_buffer, cuda_memcpy1) {
-  using namespace base;
+  using namespace base;  // 引入base命名空间
+  // 获取CPU和GPU的设备分配器实例
   auto alloc = base::CPUDeviceAllocatorFactory::get_instance();
   auto alloc_cu = base::CUDADeviceAllocatorFactory::get_instance();
 
-  int32_t size = 32;
+  int32_t size = 32;  // 定义数据大小为32个float元素
+  // 在CPU上分配并初始化内存
   float* ptr = new float[size];
   for (int i = 0; i < size; ++i) {
-    ptr[i] = float(i);
+    ptr[i] = float(i);  // 初始化数组元素为0到31
   }
+  // 创建一个外部缓冲区，使用CPU内存
   Buffer buffer(size * sizeof(float), nullptr, ptr, true);
   buffer.set_device_type(DeviceType::kDeviceCPU);
-  ASSERT_EQ(buffer.is_external(), true);
+  ASSERT_EQ(buffer.is_external(), true);  // 验证缓冲区是否为外部内存
 
+  // 创建GPU缓冲区
   Buffer cu_buffer(size * sizeof(float), alloc_cu);
-  cu_buffer.copy_from(buffer);
+  cu_buffer.copy_from(buffer);  // 将CPU缓冲区内容拷贝到GPU缓冲区
 
+
+
+
+  // 在CPU上分配内存用于接收GPU数据
   float* ptr2 = new float[size];
+  // 将GPU数据拷贝回CPU
   cudaMemcpy(ptr2, cu_buffer.ptr(), sizeof(float) * size, cudaMemcpyDeviceToHost);
+  // 验证数据一致性
   for (int i = 0; i < size; ++i) {
-    // ptr[i] = float(i);
-    ASSERT_EQ(ptr2[i], float(i));
+    // ptr[i] = float(i);  // 这行被注释掉了，因为ptr[i]已经是float(i)
+    ASSERT_EQ(ptr2[i], float(i));  // 验证拷贝回来的数据是否正确
   }
 
+  // 释放内存
   delete[] ptr;
   delete[] ptr2;
 }

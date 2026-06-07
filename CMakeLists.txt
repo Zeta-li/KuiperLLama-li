@@ -1,9 +1,15 @@
-cmake_minimum_required(VERSION 3.16)
+# 清除可能来自缓存的路径
+unset(GTest_DIR CACHE)
+unset(glog_DIR CACHE)
+unset(Armadillo_DIR CACHE)
 
+# 优先使用系统路径
+list(INSERT CMAKE_PREFIX_PATH 0 "/usr" "/usr/local")
+cmake_minimum_required(VERSION 3.16)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Set the CUDA compiler path or name
-set(CMAKE_CUDA_COMPILER "/usr/local/cuda/bin/nvcc")
+set(CMAKE_CUDA_COMPILER "/usr/local/cuda-12.6/bin/nvcc")
 
 project(llama_infer CXX CUDA)
 include(cmake/cuda.cmake)
@@ -29,6 +35,7 @@ if (QWEN3_SUPPORT)
   message(STATUS "QWEN3 SUPPORT")
   add_definitions(-DQWEN3_SUPPORT)
 endif()
+
 # ---- Add dependencies via CPM ----
 # see https://github.com/TheLartians/CPM.cmake for more info
 option(USE_CPM "Use CPM for dependency management" OFF)
@@ -84,6 +91,7 @@ if(USE_CPM)
 endif()
 
 # ---------------------------------
+
 find_package(GTest REQUIRED)
 find_package(glog REQUIRED)
 find_package(Armadillo REQUIRED)
@@ -116,3 +124,4 @@ endif()
 set_target_properties(llama PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 add_subdirectory(test)
 add_subdirectory(demo)
+

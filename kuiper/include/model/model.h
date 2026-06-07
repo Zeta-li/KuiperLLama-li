@@ -25,6 +25,9 @@ class Model {
   virtual base::Status forward(const tensor::Tensor& input, const tensor::Tensor& pos_tensor,
                                int& next) const = 0;
 
+  virtual base::Status prefill_predict(const tensor::Tensor& input, int32_t token_num,
+                                       int32_t& next) const = 0;
+
   base::ModelType model_type() const;
 
   const std::string& token_path() const;
@@ -48,11 +51,18 @@ class Model {
   virtual std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache(int32_t layer_idx,
                                                                    int32_t token_pos) const;
 
+  virtual std::pair<tensor::Tensor, tensor::Tensor> slice_kv_cache_range(int32_t layer_idx,
+                                                                         int32_t start_pos,
+                                                                         int32_t token_num) const;
+
   virtual op::EmbeddingOutput embedding(const std::vector<int>& tokens) const = 0;
 
   virtual tensor::Tensor fill_input(const tensor::Tensor& pos_tensor,
                                     const op::EmbeddingOutput& embedding_output,
                                     bool is_prompt) const;
+
+  virtual tensor::Tensor fill_input_prefill(const op::EmbeddingOutput& embedding_output,
+                                             int32_t prompt_len) const;
 
  protected:
   virtual base::Status insert_buffer(ModelBufferType buffer_idx, const tensor::Tensor& tensor);

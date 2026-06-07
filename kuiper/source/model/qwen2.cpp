@@ -8,6 +8,7 @@
 #include <utility>
 #include "../op/kernels/cpu/rope_kernel.h"
 #include "../op/kernels/cuda/rope_kernel.cuh"
+#include "../op/kernels/kernels_interface.h"
 #include "base/tick.h"
 namespace model {
 
@@ -501,6 +502,32 @@ void Qwen2Model::init_mem() {
   }
 
   CHECK(insert_buffer(ModelBufferType::kForwardOutput, forward_output));
+
+  // Prefill buffers - allocated to max sequence length for reuse
+  // Prefill RMS output [seq_len, dim]
+  tensor::Tensor prefill_rms_output(base::DataType::kDataTypeFp32, config_->seq_len_,
+                                    config_->dim_, true, alloc);
+  CHECK(insert_buffer(ModelBufferType::kPrefillRMSOutput, prefill_rms_output));
+
+  // Prefill query [seq_len, dim]
+  tensor::Tensor prefill_query(base::DataType::kDataTypeFp32, config_->seq_len_, config_->dim_,
+                               true, alloc);
+  CHECK(insert_buffer(ModelBufferType::kPrefillQuery, prefill_query));
+
+  // Prefill score storage [seq_len, head_num, seq_len] - for causal attention
+  tensor::Tensor prefill_score_storage(base::DataType::kDataTypeFp32, config_->seq_len_,
+                                       config_->head_num_, config_->seq_len_, true, alloc);
+  CHECK(insert_buffer(ModelBufferType::kPrefillScoreStorage, prefill_score_storage));
+
+  // Prefill MHA output [seq_len, dim]
+  tensor::Tensor prefill_mha_output(base::DataType::kDataTypeFp32, config_->seq_len_,
+                                    config_->dim_, true, alloc);
+  CHECK(insert_buffer(ModelBufferType::kPrefillOutputMHA, prefill_mha_output));
+
+  // Prefill attention output (after wo projection) [seq_len, dim]
+  tensor::Tensor prefill_attn_output(base::DataType::kDataTypeFp32, config_->seq_len_,
+                                     config_->dim_, true, alloc);
+  CHECK(insert_buffer(ModelBufferType::kPrefillAttnOutput, prefill_attn_output));
 }
 
 base::Status Qwen2Model::create_layers() {
@@ -629,6 +656,239 @@ base::Status Qwen2Model::predict(const tensor::Tensor& input, const tensor::Tens
   }
   next = post_processing(pos_tensor, is_prompt);
   return base::error::Success();
+}
+
+base::Status Qwen2Model::prefill_predict(const tensor::Tensor& input, int32_t token_num,
+                                           int32_t& next) const {
+  auto status = prefill_forward(input, token_num, next);
+  if (!status) {
+    return status;
+  }
+  return base::error::Success();
+}
+
+base::Status Qwen2Model::prefill_forward(const tensor::Tensor& input, int32_t token_num,
+                                           int32_t& next) const {
+  if (input.is_empty()) {
+    return base::error::InvalidArgument("The input tensor is empty.");
+  }
+  if (device_type_ == base::DeviceType::kDeviceCPU && is_quant_model_) {
+    return base::error::InternalError("Unsupported int8 quant in the cpu device");
+  }
+
+  // Create position batch tensor [0, 1, 2, ..., token_num-1]
+  tensor::Tensor pos_batch(base::DataType::kDataTypeInt32, token_num);
+  for (int32_t i = 0; i < token_num; ++i) {
+    pos_batch.index<int32_t>(i) = i;
+  }
+
+  for (int32_t layer_idx = 0; layer_idx < config_->layer_num_; ++layer_idx) {
+    attention_rms_prefill(layer_idx, input, token_num);
+    attention_qkv_prefill(layer_idx, token_num, pos_batch);
+    attention_mha_prefill(layer_idx, token_num);
+    feed_forward_prefill(layer_idx, input, token_num);
+  }
+
+  // For prefill, apply final RMSNorm and LM head only to the last token
+  {
+    CHECK(qwen_layers_ != nullptr);
+    const auto& norm = qwen_layers_->rmsnorm_layers_.at(2 * config_->layer_num_);
+    CHECK_NE(norm, nullptr);
+
+    tensor::Tensor last_token_input(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                                    const_cast<float*>(input.ptr<float>()) +
+                                                  (token_num - 1) * config_->dim_);
+    last_token_input.set_device_type(device_type_);
+    STATUS_CHECK(norm->forward(last_token_input, last_token_input));
+
+    tensor::Tensor forward_output = get_buffer(ModelBufferType::kForwardOutput);
+    CHECK_NE(qwen_layers_->cls_layer_, nullptr);
+    STATUS_CHECK(qwen_layers_->cls_layer_->forward(last_token_input, forward_output));
+  }
+
+  // Sample next token
+  tensor::Tensor forward_output = get_buffer(ModelBufferType::kForwardOutput);
+  const float* forward_logits = forward_output.ptr<float>();
+  next = static_cast<int32_t>(sampler_->sample(forward_logits, forward_output.size(),
+                                               cuda_config_ ? cuda_config_->stream : nullptr));
+  return base::error::Success();
+}
+
+void Qwen2Model::attention_rms_prefill(int32_t layer_idx, const tensor::Tensor& input,
+                                          int32_t token_num) const {
+  CHECK(qwen_layers_ != nullptr);
+  std::shared_ptr<op::Layer> rmsnorm_layer = qwen_layers_->rmsnorm_layers_.at(layer_idx);
+  CHECK(rmsnorm_layer) << "The attention rmsnorm layer is a null pointer in the qwen2 model";
+
+  tensor::Tensor rmsnorm_output = get_buffer(ModelBufferType::kPrefillRMSOutput);
+  if (rmsnorm_output.is_empty() || rmsnorm_output.size() < static_cast<size_t>(token_num * config_->dim_)) {
+    LOG(FATAL) << "Prefill RMS output buffer is not properly allocated.";
+  }
+
+  for (int32_t t = 0; t < token_num; ++t) {
+    tensor::Tensor token_input(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                                const_cast<float*>(input.ptr<float>()) + t * config_->dim_);
+    token_input.set_device_type(device_type_);
+
+    tensor::Tensor token_output(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                                 const_cast<float*>(rmsnorm_output.ptr<float>()) +
+                                               t * config_->dim_);
+    token_output.set_device_type(device_type_);
+
+    STATUS_CHECK(rmsnorm_layer->forward(token_input, token_output));
+  }
+}
+
+void Qwen2Model::attention_qkv_prefill(int32_t layer_idx, int32_t token_num,
+                                          const tensor::Tensor& pos_batch) const {
+  CHECK(qwen_layers_ != nullptr);
+  tensor::Tensor rmsnorm_output = get_buffer(ModelBufferType::kPrefillRMSOutput);
+
+  // Get prefill query buffer [token_num, dim]
+  tensor::Tensor query = get_buffer(ModelBufferType::kPrefillQuery);
+
+  const auto& query_layer = qwen_layers_->wq_layers_.at(layer_idx);
+  const auto& key_layer = qwen_layers_->wk_layers_.at(layer_idx);
+  const auto& value_layer = qwen_layers_->wv_layers_.at(layer_idx);
+  CHECK_NE(query_layer, nullptr);
+  CHECK_NE(key_layer, nullptr);
+  CHECK_NE(value_layer, nullptr);
+
+  // Get KV cache range for this layer [token_num, kv_dim]
+  auto [key_batch, val_batch] = slice_kv_cache_range(layer_idx, 0, token_num);
+
+  for (int32_t t = 0; t < token_num; ++t) {
+    // RMS norm output for this token
+    tensor::Tensor rms_out_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                              const_cast<float*>(rmsnorm_output.ptr<float>()) + t * config_->dim_);
+    rms_out_t.set_device_type(device_type_);
+
+    // Query for this token
+    tensor::Tensor query_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                            const_cast<float*>(query.ptr<float>()) + t * config_->dim_);
+    query_t.set_device_type(device_type_);
+
+    // Key for this token (writes to KV cache)
+    tensor::Tensor key_t(base::DataType::kDataTypeFp32, config_->kv_dim_, false, nullptr,
+                          const_cast<float*>(key_batch.ptr<float>()) + t * config_->kv_dim_);
+    key_t.set_device_type(device_type_);
+
+    // Value for this token (writes to KV cache)
+    tensor::Tensor val_t(base::DataType::kDataTypeFp32, config_->kv_dim_, false, nullptr,
+                          const_cast<float*>(val_batch.ptr<float>()) + t * config_->kv_dim_);
+    val_t.set_device_type(device_type_);
+
+    // Wq @ input -> query
+    STATUS_CHECK(query_layer->forward(rms_out_t, query_t));
+    // Wk @ input -> key
+    STATUS_CHECK(key_layer->forward(rms_out_t, key_t));
+    // Wv @ input -> value
+    STATUS_CHECK(value_layer->forward(rms_out_t, val_t));
+  }
+
+  // Apply RoPE in batch for all tokens
+  CHECK_NE(qwen_layers_->rope_layer_, nullptr);
+  kernel::get_rope_batch_kernel(device_type_)(
+      config_->dim_, config_->kv_dim_, config_->head_size_, token_num,
+      query, key_batch, pos_batch,
+      get_buffer(ModelBufferType::kSinCache),
+      get_buffer(ModelBufferType::kCosCache),
+      cuda_config_ ? cuda_config_->stream : nullptr);
+}
+
+void Qwen2Model::attention_mha_prefill(int32_t layer_idx, int32_t token_num) const {
+  CHECK(qwen_layers_ != nullptr);
+  tensor::Tensor key_cache = get_buffer(ModelBufferType::kKeyCache);
+  tensor::Tensor val_cache = get_buffer(ModelBufferType::kValueCache);
+
+  tensor::Tensor query = get_buffer(ModelBufferType::kPrefillQuery);
+  tensor::Tensor score_storage = get_buffer(ModelBufferType::kPrefillScoreStorage);
+  tensor::Tensor mha_output = get_buffer(ModelBufferType::kPrefillOutputMHA);
+
+  const auto& mha_layer = qwen_layers_->mha_layer_;
+  CHECK_NE(mha_layer, nullptr);
+
+  // Set up prefill mode on MHA layer
+  auto mha_ptr = std::dynamic_pointer_cast<op::MultiHeadAttention>(mha_layer);
+  mha_ptr->set_mode(op::MHA_MODE::PREFILL);
+  mha_ptr->set_pos_range(0, token_num - 1);
+  mha_ptr->set_token_num(token_num);
+  mha_ptr->set_layer_idx(layer_idx);
+
+  STATUS_CHECK(mha_layer->forward(query, score_storage, key_cache, val_cache, mha_output));
+
+  // Reset to decode mode
+  mha_ptr->set_mode(op::MHA_MODE::DECODE);
+
+  // wo @ mha_output for each token
+  tensor::Tensor attn_output = get_buffer(ModelBufferType::kPrefillAttnOutput);
+  const auto& wo_layer = qwen_layers_->wo_layers_.at(layer_idx);
+  CHECK_NE(wo_layer, nullptr);
+
+  for (int32_t t = 0; t < token_num; ++t) {
+    tensor::Tensor mha_out_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                              const_cast<float*>(mha_output.ptr<float>()) + t * config_->dim_);
+    mha_out_t.set_device_type(device_type_);
+
+    tensor::Tensor attn_out_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                               const_cast<float*>(attn_output.ptr<float>()) + t * config_->dim_);
+    attn_out_t.set_device_type(device_type_);
+
+    STATUS_CHECK(wo_layer->forward(mha_out_t, attn_out_t));
+  }
+}
+
+void Qwen2Model::feed_forward_prefill(int32_t layer_idx, const tensor::Tensor& input,
+                                           int32_t token_num) const {
+  CHECK(qwen_layers_ != nullptr);
+
+  tensor::Tensor attn_output = get_buffer(ModelBufferType::kPrefillAttnOutput);
+
+  for (int32_t t = 0; t < token_num; ++t) {
+    // Residual add: input += attn_output
+    tensor::Tensor input_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                            const_cast<float*>(input.ptr<float>()) + t * config_->dim_);
+    input_t.set_device_type(device_type_);
+
+    tensor::Tensor attn_out_t(base::DataType::kDataTypeFp32, config_->dim_, false, nullptr,
+                               const_cast<float*>(attn_output.ptr<float>()) + t * config_->dim_);
+    attn_out_t.set_device_type(device_type_);
+
+    CHECK_NE(qwen_layers_->add_layer_, nullptr);
+    STATUS_CHECK(qwen_layers_->add_layer_->forward(input_t, attn_out_t, input_t));
+
+    // FFN RMSNorm
+    tensor::Tensor ffn_norm_output(base::DataType::kDataTypeFp32, config_->dim_);
+    const auto& ffn_rmsnorm = qwen_layers_->rmsnorm_layers_.at(layer_idx + config_->layer_num_);
+    CHECK_NE(ffn_rmsnorm, nullptr);
+    STATUS_CHECK(ffn_rmsnorm->forward(input_t, ffn_norm_output));
+
+    // W1
+    tensor::Tensor w1_output(base::DataType::kDataTypeFp32, config_->hidden_dim_);
+    const auto& w1_layer = qwen_layers_->w1_layers_.at(layer_idx);
+    CHECK_NE(w1_layer, nullptr);
+    STATUS_CHECK(w1_layer->forward(ffn_norm_output, w1_output));
+
+    // W3
+    tensor::Tensor w3_output(base::DataType::kDataTypeFp32, config_->hidden_dim_);
+    const auto& w3_layer = qwen_layers_->w3_layers_.at(layer_idx);
+    CHECK_NE(w3_layer, nullptr);
+    STATUS_CHECK(w3_layer->forward(ffn_norm_output, w3_output));
+
+    // SwiGLU
+    CHECK_NE(qwen_layers_->swiglu_layer_, nullptr);
+    STATUS_CHECK(qwen_layers_->swiglu_layer_->forward(w1_output, w3_output, w1_output));
+
+    // W2
+    tensor::Tensor w2_output(base::DataType::kDataTypeFp32, config_->dim_);
+    const auto& w2_layer = qwen_layers_->w2_layers_.at(layer_idx);
+    CHECK_NE(w2_layer, nullptr);
+    STATUS_CHECK(w2_layer->forward(w1_output, w2_output));
+
+    // Residual add
+    CHECK_NE(qwen_layers_->add_layer_, nullptr);
+    STATUS_CHECK(qwen_layers_->add_layer_->forward(input_t, w2_output, input_t));
+  }
 }
 
 void Qwen2Model::attention_mha(int32_t layer_idx, const tensor::Tensor& pos_tensor) const {

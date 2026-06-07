@@ -71,6 +71,17 @@ MHAKernel get_mha_kernel(base::DeviceType device_type) {
   }
 }
 
+MHAPrefillKernel get_mha_prefill_kernel(base::DeviceType device_type) {
+  if (device_type == base::DeviceType::kDeviceCPU) {
+    return mha_prefill_kernel;
+  } else if (device_type == base::DeviceType::kDeviceCUDA) {
+    return mha_prefill_kernel_cu;
+  } else {
+    LOG(FATAL) << "Unknown device type for get an mha prefill kernel.";
+    return nullptr;
+  }
+}
+
 RoPEKernel get_rope_kernel(base::DeviceType device_type) {
   if (device_type == base::DeviceType::kDeviceCPU) {
     return rope_kernel_cpu;
@@ -78,6 +89,17 @@ RoPEKernel get_rope_kernel(base::DeviceType device_type) {
     return rope_kernel_cu;
   } else {
     LOG(FATAL) << "Unknown device type for get a rope kernel.";
+    return nullptr;
+  }
+}
+
+RoPEKernelBatch get_rope_batch_kernel(base::DeviceType device_type) {
+  if (device_type == base::DeviceType::kDeviceCPU) {
+    return rope_kernel_cpu_batch;
+  } else if (device_type == base::DeviceType::kDeviceCUDA) {
+    return rope_kernel_cu_batch;
+  } else {
+    LOG(FATAL) << "Unknown device type for get a rope batch kernel.";
     return nullptr;
   }
 }
